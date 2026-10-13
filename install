@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+# Dotfiles installer for Ubuntu on WSL
+#   curl -fsSL https://raw.githubusercontent.com/YFurusawa727/dotfiles-wsl/main/install | bash
+#
+# Non-interactive use: export GIT_USER_NAME / GIT_USER_EMAIL before running.
+
+set -euo pipefail
+
+DOTFILES_DIR="$HOME/dotfiles-wsl"
+REPO_URL="https://github.com/YFurusawa727/dotfiles-wsl.git"
+STOW_PACKAGES=(shell bash zsh git asdf starship)
+BACKUP_DIR="$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)"
+GCM_PATH="/mnt/c/Program Files/Git/mingw64/bin/git-credential-manager.exe"
+
+export DEBIAN_FRONTEND=noninteractive
+export PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$HOME/.local/bin:$PATH"
+
+### Function
+log() {
+    echo "📌 $1"
+}
+
+warn() {
+    echo "⚠️  $1" >&2
+}
+
+error_exit() {
+    echo "❌ Error: $1" >&2
+    exit 1
+}
+
+verify_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        error_exit "$1 is not installed or not in PATH"
+    fi
+}
+
+apt_install() {
+    sudo apt-get install -y --no-install-recommends "$@" </dev/null
+}
+
+check_environment() {
+    [ "$(uname -s)" = "Linux" ] || error_exit "This installer is for Ubuntu on WSL"
+    [ "$(id -u)" -ne 0 ] || error_exit "Run as your normal user, not root (sudo is used where needed)"
+    command -v apt-get >/dev/null 2>&1 || error_exit "apt-get not found (Ubuntu is required)"
+    if ! grep -qi microsoft /proc/version 2>/dev/null; then
+        warn "WSL was not detected. Windows integrations (clipboard, Git Credential Manager) will not work"
+    fi
+}
+
+install_base_packages() {
+    log "Updating apt packages..."
+    sudo apt-get update </dev/null
+    sudo apt-get upgrade -y </dev/null
+    apt_install git curl ca-certificates gnupg
+}
+
+clone_dotfiles() {
+    if [ ! -d "$DOTFILES_DIR" ]; then
+        log "Cloning dotfiles repository..."
+        git clone "$REPO_URL" "$DOTFILES_DIR" || error_exit "Failed to clone dotfiles repository"
+    fi
+}
+
+install_apt_packages() {
+    log "Installing apt packages from apt-packages.txt..."
+    local packages
+    packages=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$DOTFILES_DIR/apt-packages.txt")
+    # shellcheck disable=SC2086
+    apt_install $packages || error_exit "Failed to install apt packages"
+}
+
+setup_locale() {
+    if ! locale -a 2>/dev/null | grep -qi '^ja_JP\.utf-\?8$'; then
+        log "Generating ja_JP.UTF-8 locale..."
+        sudo locale-gen ja_JP.UTF-8 </dev/null
+    fi
+}
+
+install_third_party_packages() {
+    local need_update= arch
+    arch=$(dpkg --print-architecture)
+
+    # GitHub CLI (official apt repository)
+    if [ ! -f /etc/apt/sources.list.d/github-cli.list ]; then
+        log "Adding GitHub CLI apt repository..."
+        sudo mkdir -p -m 755 /etc/apt/keyrings
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+        sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$arch signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+        need_update=1
+    fi
+
+    # Google Cloud SDK (official apt repository)
+    if [ ! -f /etc/apt/sources.list.d/google-cloud-sdk.list ]; then
+        log "Adding Google Cloud SDK apt repository..."
+        curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+            | sudo gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+            | sudo tee /etc/apt/sources.list.d/google-cloud-sdk.list >/dev/null
+        need_update=1
+    fi
+
+    [ -n "$need_update" ] && sudo apt-get update </dev/null
+    log "Installing gh and google-cloud-cli..."
+    apt_install gh google-cloud-cli || error_exit "Failed to install gh / google-cloud-cli"
+}
+
+install_asdf() {
+    if ! command -v asdf >/dev/null 2>&1; then
+        log "Installing asdf..."
+        local version arch tmp
+        case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64 | arm64) arch=arm64 ;;
+            *) error_exit "Unsupported architecture: $(uname -m)" ;;
+        esac
+        # Resolve the latest release tag from the redirect (avoids GitHub API rate limits)
+        version=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/asdf-vm/asdf/releases/latest)
+        version=${version##*/}
+        [ -n "$version" ] || error_exit "Failed to resolve latest asdf version"
+
+        tmp=$(mktemp -d)
+        curl -fsSL -o "$tmp/asdf.tar.gz" \
+            "https://github.com/asdf-vm/asdf/releases/download/$version/asdf-$version-linux-$arch.tar.gz" \
+            || error_exit "Failed to download asdf $version"
+        mkdir -p "$HOME/.local/bin"
+        tar -xzf "$tmp/asdf.tar.gz" -C "$HOME/.local/bin"
+        rm -rf "$tmp"
+    fi
+    verify_command asdf
+
+    # zsh completion (fpath is set in .zshrc)
+    local completions="${ASDF_DATA_DIR:-$HOME/.asdf}/completions"
+    mkdir -p "$completions"
+    asdf completion zsh > "$completions/_asdf"
+}
+
+setup_env_file() {
+    log "Setting up environment variables..."
+    local env_file="$DOTFILES_DIR/.env"
+
+    if [ -f "$env_file" ]; then
+        log "✓ .env file already exists"
+    else
+        local git_name="${GIT_USER_NAME:-}" git_email="${GIT_USER_EMAIL:-}"
+
+        if { [ -z "$git_name" ] || [ -z "$git_email" ]; } && (exec </dev/tty) 2>/dev/null; then
+            echo ""
+            echo "📝 Please configure your personal information for git"
+            printf "Enter your full name: "
+            read -r git_name </dev/tty
+            printf "Enter your email: "
+            read -r git_email </dev/tty
+        fi
+
+        if [ -n "$git_name" ] && [ -n "$git_email" ]; then
+            {
+                echo "# Environment variables for dotfiles configuration"
+                echo ""
+                echo "# Git configuration"
+                printf 'GIT_USER_NAME="%s"\n' "$git_name"
+                printf 'GIT_USER_EMAIL="%s"\n' "$git_email"
+            } > "$env_file"
+            log "✓ Git configuration saved in .env file"
+        else
+            cp "$DOTFILES_DIR/.env.example" "$env_file"
+            warn "Git name/email not set. Edit $env_file and re-run install"
+        fi
+    fi
+
+    set -a
+    # shellcheck disable=SC1090
+    . "$env_file"
+    set +a
+}
+
+setup_gitconfig() {
+    local gitconfig="$DOTFILES_DIR/packages/git/.gitconfig"
+
+    if [ ! -f "$gitconfig" ]; then
+        log "Creating .gitconfig from template..."
+        cp "$DOTFILES_DIR/packages/git/.gitconfig.example" "$gitconfig"
+        if [ "${GIT_USER_NAME:-Your Full Name}" != "Your Full Name" ] && [ -n "${GIT_USER_EMAIL:-}" ]; then
+            git config -f "$gitconfig" user.name "$GIT_USER_NAME"
+            git config -f "$gitconfig" user.email "$GIT_USER_EMAIL"
+            log "Git user configured: $GIT_USER_NAME <$GIT_USER_EMAIL>"
+        else
+            warn "Please edit $gitconfig to set your name and email"
+        fi
+    else
+        log "✓ Git configuration already exists"
+    fi
+
+    # Use Git Credential Manager from Git for Windows (shares credentials with Windows)
+    if [ -z "$(git config -f "$gitconfig" credential.helper || true)" ]; then
+        if [ -f "$GCM_PATH" ]; then
+            log "Configuring Git Credential Manager (Windows)..."
+            git config -f "$gitconfig" credential.helper "${GCM_PATH// /\\ }"
+        else
+            warn "Git Credential Manager not found. Install Git for Windows, or use 'gh auth setup-git'"
+        fi
+    fi
+}
+
+# Move existing files that would conflict with stow into $BACKUP_DIR
+backup_conflicts() {
+    local package="$1" src rel target
+    while IFS= read -r -d '' src; do
+        rel="${src#"$DOTFILES_DIR/packages/$package/"}"
+        case "$rel" in *.example) continue ;; esac
+        target="$HOME/$rel"
+
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            if [ "$(readlink -f "$target")" = "$(readlink -f "$src")" ]; then
+                continue
+            fi
+            mkdir -p "$BACKUP_DIR/$(dirname "$rel")"
+            mv "$target" "$BACKUP_DIR/$rel"
+            log "Backed up ~/$rel -> $BACKUP_DIR/$rel"
+        fi
+    done < <(find "$DOTFILES_DIR/packages/$package" \( -type f -o -type l \) -print0)
+}
+
+setup_symlinks() {
+    log "Setting up configuration files with stow..."
+    mkdir -p "$HOME/.config"
+
+    local package
+    for package in "${STOW_PACKAGES[@]}"; do
+        backup_conflicts "$package"
+    done
+
+    stow --restow --no-folding --ignore='\.example$' -v \
+        -d "$DOTFILES_DIR/packages" -t "$HOME" "${STOW_PACKAGES[@]}" \
+        || error_exit "Failed to setup configuration files with stow"
+
+    if [ -d "$BACKUP_DIR" ]; then
+        log "Existing files were moved to $BACKUP_DIR"
+    fi
+}
+
+setup_asdf_runtimes() {
+    log "Setting up asdf plugins and runtimes..."
+    if [ ! -f "$HOME/.tool-versions" ]; then
+        warn "~/.tool-versions not found, skipping asdf runtime installation"
+        return
+    fi
+
+    local plugin
+    for plugin in $(awk '{print $1}' "$HOME/.tool-versions"); do
+        if ! asdf plugin list 2>/dev/null | grep -qx "$plugin"; then
+            log "Adding asdf plugin: $plugin"
+            asdf plugin add "$plugin" || error_exit "Failed to add asdf plugin: $plugin"
+        fi
+    done
+
+    # Installs every version listed in ~/.tool-versions (already installed ones are skipped)
+    (cd "$HOME" && asdf install) || error_exit "Failed to install asdf runtimes"
+}
+
+install_npm_packages() {
+    # asdf-nodejs installs ~/.default-npm-packages on each new Node install;
+    # this also covers Node versions that were installed before.
+    local list="$HOME/.default-npm-packages" pkg
+    [ -f "$list" ] || return 0
+    verify_command npm
+
+    while IFS= read -r pkg; do
+        pkg="${pkg%%#*}"
+        pkg="${pkg//[[:space:]]/}"
+        [ -n "$pkg" ] || continue
+        if ! (cd "$HOME" && npm ls -g --depth=0 "$pkg" >/dev/null 2>&1); then
+            log "Installing npm package: $pkg"
+            (cd "$HOME" && npm install -g "$pkg") || error_exit "Failed to install npm package: $pkg"
+        fi
+    done < "$list"
+    asdf reshim nodejs
+}
+
+install_claude_code() {
+    if ! command -v claude >/dev/null 2>&1; then
+        log "Installing Claude Code..."
+        curl -fsSL https://claude.ai/install.sh | bash || error_exit "Failed to install Claude Code"
+    else
+        log "✓ Claude Code already installed"
+    fi
+}
+
+set_default_shell() {
+    local zsh_path current
+    zsh_path=$(command -v zsh)
+    current=$(getent passwd "$USER" | cut -d: -f7)
+    if [ "$current" != "$zsh_path" ]; then
+        log "Changing default shell to zsh..."
+        sudo chsh -s "$zsh_path" "$USER" </dev/null || warn "Failed to change default shell. Run: chsh -s $zsh_path"
+    fi
+}
+
+check_docker() {
+    if command -v docker >/dev/null 2>&1; then
+        log "✓ docker is available (Docker Desktop WSL integration)"
+    else
+        warn "docker not found. Enable this distro in Docker Desktop: Settings > Resources > WSL integration"
+    fi
+}
+
+# Wrapped in main so that `curl ... | bash` reads the whole script before running it
+main() {
+    check_environment
+
+    if ! sudo -n true 2>/dev/null; then
+        log "sudo is required for apt operations"
+        sudo -v || error_exit "sudo authentication failed"
+    fi
+
+    install_base_packages
+    clone_dotfiles
+    install_apt_packages
+    setup_locale
+    install_third_party_packages
+    install_asdf
+
+    setup_env_file
+    setup_gitconfig
+    setup_symlinks
+
+    setup_asdf_runtimes
+    install_npm_packages
+    install_claude_code
+    set_default_shell
+    check_docker
+
+    log "Dotfiles setup completed successfully! 🎉"
+    log "Restart your terminal (or run 'exec zsh') to apply the settings"
+}
+
+main "$@"

@@ -1,0 +1,45 @@
+# Common settings shared by bash and zsh (sourced from .bashrc / .zshrc)
+
+### Environment
+export LANG=ja_JP.UTF-8
+export LC_CTYPE=ja_JP.UTF-8
+export EDITOR=vim
+
+# asdf shims and user binaries (asdf / Claude Code live in ~/.local/bin)
+export PATH="${ASDF_DATA_DIR:-$HOME/.asdf}/shims:$HOME/.local/bin:$PATH"
+
+export FZF_DEFAULT_OPTS='--height 40% --reverse --border --color=fg:#d4d4d4,bg:#1e1e1e,hl:#3794ff,fg+:#ffffff,bg+:#2d2d2d,hl+:#3794ff,info:#ffcc02,prompt:#bc3fbc,pointer:#f44747,marker:#4ec9b0'
+
+### Aliases
+alias a='alias'
+alias ..='cd ..'
+alias ..2='cd ../..'
+alias ..3='cd ../../..'
+alias ls='ls --color=auto'
+alias ll='clear && ls -alF'
+alias g='git'
+alias m='make'
+alias s='ssh'
+alias dotinstall='~/dotfiles-wsl/install'
+alias dottest='~/dotfiles-wsl/test_install.sh 2>/dev/null | tail -5'
+alias dottest-full='~/dotfiles-wsl/test_install.sh'
+alias dottest-summary='~/dotfiles-wsl/test_install.sh 2>/dev/null | grep -E "(✓|✗|Tests completed)"'
+alias dotvalidate='~/dotfiles-wsl/validate.sh'
+alias dotcheck='~/dotfiles-wsl/validate.sh | tail -3'
+
+### WSL helpers (Mac-like commands backed by Windows)
+# Clipboard
+alias pbcopy='clip.exe'
+alias pbpaste='powershell.exe -NoProfile -Command Get-Clipboard | sed "s/\r$//"'
+
+# open <path|url>: open with the Windows default app (like macOS `open`)
+open() {
+    target="${1:-.}"
+    if [ -e "$target" ]; then
+        explorer.exe "$(wslpath -w "$target")"
+    else
+        explorer.exe "$target"
+    fi
+    # explorer.exe returns 1 even on success
+    return 0
+}

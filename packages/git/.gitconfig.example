@@ -1,0 +1,28 @@
+[user]
+	name = Your Full Name
+	email = your.email@example.com
+[alias]
+	s   = status -sb
+	d   = diff
+	a   = add
+	aa  = add -A
+	b   = branch
+	co  = checkout
+	cob = checkout -b
+	c   = commit
+	cm  = commit -m
+	pso = push origin
+	pl  = pull
+	plo = pull origin
+	f   = fetch
+	fup = fetch upstream
+	l   = log
+[core]
+	editor = vim -c \"set fenc=utf-8\"
+	autocrlf = input
+[init]
+	defaultBranch = main
+[color]
+	diff = auto
+	status = auto
+	branch = auto

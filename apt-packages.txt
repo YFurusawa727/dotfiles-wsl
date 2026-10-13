@@ -1,0 +1,24 @@
+# apt packages installed by `install` (one per line, # for comments)
+
+# Build / base tools
+build-essential
+ca-certificates
+curl
+wget
+git
+gnupg
+unzip
+zip
+vim
+locales
+bash-completion
+
+# Dotfiles management
+stow
+
+# Shell
+zsh
+zsh-autosuggestions
+zsh-syntax-highlighting
+starship
+fzf
